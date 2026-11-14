@@ -7,7 +7,7 @@ underlying library from an official libghostty-vt release, prebuilt or
 built from source with Zig 0.17.
 
 The crate version normally follows gpui-cn and records its libghostty-vt
-release as build metadata. For example, `0.8.0+ghostty-vt.1.0.1` uses the
+release as build metadata. For example, `0.9.0+ghostty-vt.1.0.1` uses the
 libghostty-vt `vt-1.0.1` release.
 
 This crate is a fork of [libghostty-vt](https://github.com/Uzaaft/libghostty-rs)

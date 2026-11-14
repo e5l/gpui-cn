@@ -7,7 +7,7 @@ This crate is currently developed primarily for
 [`gpui-cn`](https://github.com/prabirshrestha/gpui-cn).
 
 The crate version normally follows gpui-cn and records its libghostty-vt
-release as build metadata. For example, `0.8.0+ghostty-vt.1.0.1` uses the
+release as build metadata. For example, `0.9.0+ghostty-vt.1.0.1` uses the
 libghostty-vt `vt-1.0.1` release.
 
 On macOS, iOS and Windows GNU, the build script downloads the release's
