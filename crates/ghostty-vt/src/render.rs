@@ -6,7 +6,7 @@ use std::{convert::Into, marker::PhantomData, mem::MaybeUninit};
 
 use crate::{
     alloc::Object,
-    error::{Error, Result, from_optional_result, from_result},
+    error::{Error, Result, from_optional_result, from_optional_result_uninit, from_result},
     ffi,
     screen::{Cell, Row},
     style::{RgbColor, Style},
@@ -286,6 +286,13 @@ impl Snapshot<'_> {
         })
     }
 
+    /// A value that changes whenever an update changes the image placements
+    /// that [`ImageIterator::update`] returns. Compare it only for
+    /// equality. It is always 0 while Kitty graphics are off.
+    pub fn image_placements_generation(&self) -> Result<u64> {
+        self.get(ffi::RenderStateData::IMAGE_PLACEMENTS_GENERATION)
+    }
+
     /// Get the overscan rows requested with [`RenderState::set_overscan`].
     pub fn overscan_request(&self) -> Result<Overscan> {
         let raw = self.get::<ffi::RenderStateOverscan>(ffi::RenderStateData::OVERSCAN_REQUEST)?;
@@ -323,10 +330,8 @@ impl Snapshot<'_> {
 
     /// Get the visual style of the cursor.
     pub fn cursor_visual_style(&self) -> Result<CursorVisualStyle> {
-        self.get::<ffi::RenderStateCursorVisualStyle::Type>(
-            ffi::RenderStateData::CURSOR_VISUAL_STYLE,
-        )
-        .and_then(|v| v.try_into().map_err(|_| Error::InvalidValue))
+        self.get::<ffi::CursorStyle::Type>(ffi::RenderStateData::CURSOR_VISUAL_STYLE)
+            .and_then(|v| v.try_into().map_err(|_| Error::InvalidValue))
     }
 
     /// Get the relative position of the cursor and other information
@@ -607,6 +612,19 @@ impl CellIteration<'_> {
         from_result(result)
     }
 
+    /// Read a value that libghostty reports as `NO_VALUE` when it is absent.
+    fn get_optional<T>(&self, tag: ffi::RenderStateRowCellsData::Type) -> Result<Option<T>> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_render_state_row_cells_get(
+                self.iter.0.as_raw(),
+                tag,
+                value.as_mut_ptr().cast(),
+            )
+        };
+        from_optional_result_uninit(result, value)
+    }
+
     fn get<T>(&self, tag: ffi::RenderStateRowCellsData::Type) -> Result<T> {
         let mut value = MaybeUninit::<T>::zeroed();
         let result = unsafe {
@@ -628,7 +646,7 @@ impl CellIteration<'_> {
 
     /// The style for the current cell.
     pub fn style(&self) -> Result<Style> {
-        let mut value = ffi::sized!(ffi::Style);
+        let mut value = ffi::Style::default();
         let result = unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 self.iter.0.as_raw(),
@@ -649,12 +667,9 @@ impl CellIteration<'_> {
     /// case the caller should use whatever default foreground color it want
     /// (e.g. the terminal foreground).
     pub fn fg_color(&self) -> Result<Option<RgbColor>> {
-        let res = self.get::<ffi::ColorRgb>(ffi::RenderStateRowCellsData::FG_COLOR);
-        match res {
-            Ok(o) => Ok(Some(o.into())),
-            Err(Error::InvalidValue) => Ok(None),
-            Err(e) => Err(e),
-        }
+        Ok(self
+            .get_optional::<ffi::ColorRgb>(ffi::RenderStateRowCellsData::FG_COLOR)?
+            .map(Into::into))
     }
 
     /// The resolved background color of the cell.
@@ -667,12 +682,9 @@ impl CellIteration<'_> {
     /// caller should use whatever default background color it wants
     /// (e.g. the terminal background).
     pub fn bg_color(&self) -> Result<Option<RgbColor>> {
-        let res = self.get::<ffi::ColorRgb>(ffi::RenderStateRowCellsData::BG_COLOR);
-        match res {
-            Ok(o) => Ok(Some(o.into())),
-            Err(Error::InvalidValue) => Ok(None),
-            Err(e) => Err(e),
-        }
+        Ok(self
+            .get_optional::<ffi::ColorRgb>(ffi::RenderStateRowCellsData::BG_COLOR)?
+            .map(Into::into))
     }
 
     /// Get the grapheme codepoints.
@@ -698,14 +710,21 @@ impl CellIteration<'_> {
     /// The buffer must be at least [`CellIteration::graphemes_len`] elements.
     /// The base codepoint is written first, followed by any extra codepoints.
     pub fn graphemes_buf(&self, buf: &mut [char]) -> Result<()> {
+        // A `char` is a valid `u32`, and the library writes only codepoints
+        // of the cell's text.
+        let mut raw = ffi::CodepointBuffer {
+            ptr: buf.as_mut_ptr().cast(),
+            cap: buf.len(),
+            len: 0,
+        };
         let result = unsafe {
             ffi::ghostty_render_state_row_cells_get(
                 self.iter.0.as_raw(),
                 ffi::RenderStateRowCellsData::GRAPHEMES_BUF,
-                buf.as_mut_ptr().cast(),
+                std::ptr::from_mut(&mut raw).cast(),
             )
         };
-        from_result(result)
+        crate::error::from_result_with_len(result, raw.len).map(|_| ())
     }
 
     /// Append the current cell's full grapheme cluster as UTF-8 to a string.
@@ -862,11 +881,201 @@ pub enum Dirty {
 #[non_exhaustive]
 pub enum CursorVisualStyle {
     /// Bar cursor (DECSCUSR 5, 6).
-    Bar = ffi::RenderStateCursorVisualStyle::BAR,
+    Bar = ffi::CursorStyle::BAR,
     /// Block cursor (DECSCUSR 1, 2).
-    Block = ffi::RenderStateCursorVisualStyle::BLOCK,
+    Block = ffi::CursorStyle::BLOCK,
     /// Underline cursor (DECSCUSR 3, 4).
-    Underline = ffi::RenderStateCursorVisualStyle::UNDERLINE,
+    Underline = ffi::CursorStyle::UNDERLINE,
     /// Hollow block cursor.
-    BlockHollow = ffi::RenderStateCursorVisualStyle::BLOCK_HOLLOW,
+    BlockHollow = ffi::CursorStyle::BLOCK_HOLLOW,
+}
+
+/// Opaque handle to a render-state image iterator.
+///
+/// Fill it from a snapshot with [`ImageIterator::update`] after every
+/// update. It visits the image placements with something to draw in the
+/// captured rows, the viewport plus any overscan.
+#[derive(Debug)]
+pub struct ImageIterator(Object<ffi::RenderStateImageIteratorImpl>);
+
+/// An active iteration over the image placements of a snapshot.
+#[derive(Debug)]
+pub struct ImageIteration<'s> {
+    iter: &'s mut ImageIterator,
+    _phan: PhantomData<&'s Snapshot<'s>>,
+}
+
+/// The layer an image placement is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ImageLayer {
+    /// Under the cell backgrounds.
+    BelowBackground,
+    /// Over the cell backgrounds and under the text.
+    BelowText,
+    /// Over the text.
+    AboveText,
+}
+
+/// The kind of a Kitty graphics placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KittyPlacementKind {
+    /// One run of Unicode placeholder cells in one row.
+    Virtual,
+    /// A placement positioned relative to a parent placement.
+    Relative,
+    /// A placement at a cell, which scrolls with the text.
+    Fixed,
+}
+
+/// The drawing geometry of one image placement. All pixel values use the
+/// cell size given to [`Terminal::resize`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct ImagePlacement {
+    /// The Kitty graphics image id. Look the image up with
+    /// `kitty::graphics::Graphics::image`.
+    pub image_id: u32,
+    /// Changes whenever the image's pixels change, animation frames
+    /// included. Never 0.
+    pub image_generation: u64,
+    /// The layer to draw in.
+    pub layer: ImageLayer,
+    /// Orders placements within a layer; lower draws first.
+    pub z: i32,
+    /// The column of the top-left cell. It can be negative.
+    pub viewport_col: i32,
+    /// The row of the top-left cell. It can be negative, above the
+    /// viewport.
+    pub viewport_row: i32,
+    /// The columns of cells the placement covers.
+    pub grid_cols: u32,
+    /// The rows of cells the placement covers.
+    pub grid_rows: u32,
+    /// Pixels from the left edge of the top-left cell to the image.
+    pub cell_offset_x: u32,
+    /// Pixels from the top edge of the top-left cell to the image.
+    pub cell_offset_y: u32,
+    /// The width to draw the image at, in pixels.
+    pub pixel_width: u32,
+    /// The height to draw the image at, in pixels.
+    pub pixel_height: u32,
+    /// The left edge of the part of the image to draw, in image pixels.
+    pub source_x: u32,
+    /// The top edge of the part of the image to draw, in image pixels.
+    pub source_y: u32,
+    /// The width of the part of the image to draw, in image pixels.
+    pub source_width: u32,
+    /// The height of the part of the image to draw, in image pixels.
+    pub source_height: u32,
+    /// The Kitty placement id, or 0 when it has none.
+    pub placement_id: u32,
+    /// The kind of Kitty placement.
+    pub kind: KittyPlacementKind,
+}
+
+impl ImageIterator {
+    /// Create a new image iterator.
+    pub fn new() -> Result<Self> {
+        let mut raw: ffi::RenderStateImageIterator = std::ptr::null_mut();
+        let result =
+            unsafe { ffi::ghostty_render_state_image_iterator_new(std::ptr::null(), &raw mut raw) };
+        from_result(result)?;
+        Ok(Self(Object::new(raw)?))
+    }
+
+    /// Fill the iterator with the placements of a snapshot.
+    pub fn update<'s>(&'s mut self, snapshot: &'s Snapshot<'s>) -> Result<ImageIteration<'s>> {
+        let result = unsafe {
+            ffi::ghostty_render_state_get(
+                snapshot.0.0.as_raw(),
+                ffi::RenderStateData::IMAGE_ITERATOR,
+                std::ptr::from_mut(&mut self.0.ptr).cast(),
+            )
+        };
+        from_result(result)?;
+        Ok(ImageIteration {
+            iter: self,
+            _phan: PhantomData,
+        })
+    }
+}
+
+impl Drop for ImageIterator {
+    fn drop(&mut self) {
+        unsafe { ffi::ghostty_render_state_image_iterator_free(self.0.as_raw()) }
+    }
+}
+
+impl ImageIteration<'_> {
+    fn get<T>(&self, tag: ffi::RenderStateImageData::Type) -> Result<T> {
+        let mut value = MaybeUninit::<T>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_render_state_image_get(
+                self.iter.0.as_raw(),
+                tag,
+                value.as_mut_ptr().cast(),
+            )
+        };
+        from_result(result)?;
+        // SAFETY: Value should be initialized after successful call.
+        Ok(unsafe { value.assume_init() })
+    }
+
+    /// Move to the next placement and read it.
+    ///
+    /// The order is not the drawing order: sort by
+    /// [`ImagePlacement::layer`] and then [`ImagePlacement::z`]. Placements
+    /// from protocols other than Kitty graphics are skipped.
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "lending `next` cannot implement trait"
+    )]
+    pub fn next(&mut self) -> Option<Result<ImagePlacement>> {
+        loop {
+            if !unsafe { ffi::ghostty_render_state_image_iterator_next(self.iter.0.as_raw()) } {
+                return None;
+            }
+            match self.get::<ffi::ImageProtocol::Type>(ffi::RenderStateImageData::PROTOCOL) {
+                Ok(ffi::ImageProtocol::KITTY) => return Some(self.read()),
+                Ok(_) => {}
+                Err(error) => return Some(Err(error)),
+            }
+        }
+    }
+
+    fn read(&self) -> Result<ImagePlacement> {
+        use ffi::RenderStateImageData as Data;
+        let layer = match self.get::<ffi::ImageLayer::Type>(Data::LAYER)? {
+            ffi::ImageLayer::BELOW_BACKGROUND => ImageLayer::BelowBackground,
+            ffi::ImageLayer::BELOW_TEXT => ImageLayer::BelowText,
+            ffi::ImageLayer::ABOVE_TEXT => ImageLayer::AboveText,
+            _ => return Err(Error::InvalidValue),
+        };
+        let kind = match self.get::<ffi::RenderStateKittyPlacementKind::Type>(Data::KITTY_KIND)? {
+            ffi::RenderStateKittyPlacementKind::VIRTUAL => KittyPlacementKind::Virtual,
+            ffi::RenderStateKittyPlacementKind::RELATIVE => KittyPlacementKind::Relative,
+            ffi::RenderStateKittyPlacementKind::FIXED => KittyPlacementKind::Fixed,
+            _ => return Err(Error::InvalidValue),
+        };
+        Ok(ImagePlacement {
+            image_id: self.get(Data::IMAGE_ID)?,
+            image_generation: self.get(Data::IMAGE_GENERATION)?,
+            layer,
+            z: self.get(Data::Z)?,
+            viewport_col: self.get(Data::VIEWPORT_COL)?,
+            viewport_row: self.get(Data::VIEWPORT_ROW)?,
+            grid_cols: self.get(Data::GRID_COLS)?,
+            grid_rows: self.get(Data::GRID_ROWS)?,
+            cell_offset_x: self.get(Data::CELL_OFFSET_X)?,
+            cell_offset_y: self.get(Data::CELL_OFFSET_Y)?,
+            pixel_width: self.get(Data::PIXEL_WIDTH)?,
+            pixel_height: self.get(Data::PIXEL_HEIGHT)?,
+            source_x: self.get(Data::SOURCE_X)?,
+            source_y: self.get(Data::SOURCE_Y)?,
+            source_width: self.get(Data::SOURCE_WIDTH)?,
+            source_height: self.get(Data::SOURCE_HEIGHT)?,
+            placement_id: self.get(Data::KITTY_PLACEMENT_ID)?,
+            kind,
+        })
+    }
 }

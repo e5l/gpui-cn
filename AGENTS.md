@@ -19,18 +19,38 @@ that this repository does not name. The workspace has four crates:
   `snapshot` binary renders the gallery to PNG files without a window, on
   macOS. `cargo run` at the root opens it. Its default `terminal` feature
   adds the Terminal story.
-- `crates/ghostty-vt-sys` builds libghostty-vt from the pinned Ghostty
-  source with Zig 0.17 and holds its raw bindings, which are generated and
-  committed. `crates/ghostty-vt` is the safe API on it. They have no GPUI
-  in them. Their SemVer core normally follows gpui-cn, and their build
-  metadata records the pinned Ghostty version and short commit. An
+- `crates/ghostty-vt-sys` links the pinned libghostty-vt release and
+  holds its raw bindings, which are generated and committed. On macOS,
+  iOS and Windows GNU it downloads the release's prebuilt library and
+  checks its sha256, with no Zig, and links it statically. For the
+  Windows GNU targets it first renames symbols of Zig's compiler_rt in
+  the archive (`build/compiler_rt.rs`): GNU ld with `--gc-sections` does
+  not resolve its weak stack probes, and Zig's own linker clashes with its
+  weak defaults. Linux and Windows MSVC build the release source
+  tarball with Zig 0.17 and the release deps tarball (`zig build
+  --system`). `GHOSTTY_VT_PREBUILT_MSVC=1` makes MSVC link the Windows
+  zip instead; that works only with lld, so the build script stops when
+  the linker is `link.exe`. `GHOSTTY_VT_FROM_SOURCE=1`
+  or `GHOSTTY_SOURCE_DIR` forces a source build. `GHOSTTY_VT_LIB_DIR`
+  links a static library on disk as it is, `GHOSTTY_VT_PREBUILT_URL` with
+  `GHOSTTY_VT_PREBUILT_SHA256` replaces the target's prebuilt release
+  file, and `GHOSTTY_RELEASE_URL` is a mirror of the release files.
+  `build/source.rs` chooses among them, in that order after the source
+  overrides, and its tests hold the precedence. `crates/ghostty-vt` is
+  the safe API on it. They have no GPUI in them. Their SemVer core
+  normally follows gpui-cn, and their build metadata records the release,
+  such as `+ghostty-vt.1.0.1`. An
   intentional independent engine bump may diverge and sets
   `workspace.metadata.ghostty.version-mode` to `independent`. One `v*`
   release tag publishes the workspace in dependency order and skips versions
   already on crates.io.
-  Never patch the Ghostty source. Move the pin with `scripts/sync.sh`,
-  which keeps the submodule, `GHOSTTY.lock`, the bindings, the terminfo
-  database, and the shell integration scripts in step.
+  Never patch the Ghostty source. Move the pin with
+  `scripts/sync.sh vt-<version>`, which checks the release signature with
+  minisign and keeps the submodule, `GHOSTTY.lock`, the bindings, the
+  terminfo database, and the shell integration scripts in step. The C API
+  passes many values through `void*` get and set keys, so the compiler
+  does not catch a changed value type: after a bump, check every key the
+  safe API uses against the header comments.
 
 ## Rules
 
@@ -166,8 +186,9 @@ RUSTDOCFLAGS='-D warnings' cargo doc -p gpui-cn -p ghostty-vt -p ghostty-vt-sys 
 cargo deny check licenses
 ```
 
-These need Zig 0.17 on `PATH` (see `mise.toml`) and, for a build without
-network, the `third_party/ghostty` submodule checked out.
+On macOS these need no Zig. On Linux they need Zig 0.17 on `PATH` (see
+`mise.toml`). A build without network needs `GHOSTTY_RELEASE_DIR` set to a
+directory with the release files.
 
 `deny.toml` lists the licenses this repository accepts. A crate that is
 only available under the GPL or the LGPL fails the check. Never add one.

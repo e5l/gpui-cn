@@ -307,6 +307,62 @@ fn modes_and_options_round_trip() {
 }
 
 #[test]
+fn kitty_options_round_trip() {
+    let mut terminal = common::terminal(10, 2);
+    assert_eq!(terminal.kitty_image_storage_limit().unwrap(), 10_000_000);
+    terminal.set_kitty_image_storage_limit(0).unwrap();
+    assert_eq!(terminal.kitty_image_storage_limit().unwrap(), 0);
+
+    assert_eq!(terminal.kitty_image_temp_file_dir().unwrap(), None);
+    terminal
+        .set_kitty_image_temp_file_dir(Some("/tmp/kitty-images"))
+        .unwrap();
+    assert_eq!(
+        terminal.kitty_image_temp_file_dir().unwrap(),
+        Some("/tmp/kitty-images")
+    );
+    terminal.set_kitty_image_temp_file_dir(None).unwrap();
+    assert_eq!(terminal.kitty_image_temp_file_dir().unwrap(), None);
+}
+
+#[test]
+fn the_render_state_lists_kitty_image_placements() {
+    use ghostty_vt::render::{ImageIterator, ImageLayer, KittyPlacementKind};
+    let mut terminal = common::terminal(10, 4);
+    terminal.resize(10, 4, 8, 16).unwrap();
+    // A 2x2 RGBA image placed at column 2, two columns by one row.
+    terminal
+        .vt_write(b"ab\x1b_Ga=T,q=2,i=9,f=32,s=2,v=2,c=2,r=1,z=-1;/wAA/wD/AP8AAP//////gA==\x1b\\");
+    let mut state = RenderState::new().unwrap();
+    let mut images = ImageIterator::new().unwrap();
+    let snapshot = state.update(&terminal).unwrap();
+    assert_ne!(snapshot.image_placements_generation().unwrap(), 0);
+    let mut iteration = images.update(&snapshot).unwrap();
+    let placement = iteration.next().unwrap().unwrap();
+    assert!(iteration.next().is_none());
+    assert_eq!(placement.image_id, 9);
+    assert_eq!(placement.kind, KittyPlacementKind::Fixed);
+    assert_eq!(placement.layer, ImageLayer::BelowText);
+    assert_eq!((placement.viewport_col, placement.viewport_row), (2, 0));
+    assert_eq!((placement.grid_cols, placement.grid_rows), (2, 1));
+    assert_eq!((placement.pixel_width, placement.pixel_height), (16, 16));
+    assert_eq!((placement.source_width, placement.source_height), (2, 2));
+}
+
+#[test]
+fn osc_parser_reads_the_window_title() {
+    let mut parser = ghostty_vt::osc::Parser::new().unwrap();
+    for byte in b"2;hello title" {
+        parser.next_byte(*byte);
+    }
+    let command = parser.end(0x07);
+    let ghostty_vt::osc::CommandType::ChangeWindowTitle { title } = command.command_type() else {
+        panic!("not a title command");
+    };
+    assert_eq!(title, "hello title");
+}
+
+#[test]
 fn key_and_mouse_encoders_follow_terminal_modes() {
     let mut terminal = common::terminal(10, 2);
     let mut encoder = key::Encoder::new().unwrap();
@@ -591,7 +647,10 @@ fn terminfo_and_shell_integration_resources_are_written_once() {
     assert!(terminfo.join("78/xterm-ghostty").is_file());
     assert!(terminfo.join("x/xterm-ghostty").is_file());
     assert!(terminfo.join("g/ghostty").is_file());
-    assert!(ghostty_vt::terminfo::SOURCE.starts_with("xterm-ghostty|ghostty|Ghostty,"));
+    assert!(
+        ghostty_vt::terminfo::SOURCE
+            .starts_with("xterm-ghostty|ghostty|Ghostty terminal emulator,")
+    );
 
     let resources = ghostty_vt::shell_integration::resources_dir().unwrap();
     for shell in ghostty_vt::shell_integration::SHELLS {
