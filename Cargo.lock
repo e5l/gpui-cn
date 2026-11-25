@@ -2658,6 +2658,7 @@ dependencies = [
  "image",
  "lb-wry",
  "libc",
+ "log",
  "nucleo-matcher",
  "portable-pty",
  "smol",

@@ -161,6 +161,7 @@ const STEP: Duration = Duration::from_millis(250);
 /// probe; it returns whether the leader has exited.
 #[cfg(unix)]
 pub(crate) fn end_session(leader: libc::pid_t, mut reap: impl FnMut() -> bool) {
+    log::info!(target: "gpui_cn::terminal", "ending the session of process {leader}: SIGHUP, then SIGTERM, then SIGKILL");
     for signal in [libc::SIGHUP, libc::SIGTERM, libc::SIGKILL] {
         let pids = session(leader);
         if pids.is_empty() {

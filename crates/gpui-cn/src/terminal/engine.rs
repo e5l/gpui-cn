@@ -553,6 +553,7 @@ impl EngineHandle {
 
     /// Stop the program and the owner thread. Idempotent.
     pub fn close(&self) {
+        log::info!(target: "gpui_cn::terminal", "close requested by the host");
         let mut mail = self.shared.lock();
         self.shared.set_closing();
         self.shared.bump(&mut mail);
@@ -854,6 +855,7 @@ impl Owner {
     fn run(&mut self) {
         while !self.shared.closing.load(Ordering::Acquire) {
             if let Err(error) = self.turn() {
+                log::error!(target: "gpui_cn::terminal", "engine failed, closing the terminal: {error}");
                 self.snapshot.status = TerminalStatus::Failed(error.to_string());
                 self.publish();
                 break;
@@ -1146,7 +1148,8 @@ impl Owner {
                 true
             }
             // Try again after another idle period rather than at once.
-            Err(_) => {
+            Err(error) => {
+                log::debug!(target: "gpui_cn::terminal", "could not park an idle terminal: {error}");
                 self.parking.last_use = Instant::now();
                 false
             }
@@ -1158,8 +1161,12 @@ impl Owner {
         let Some(parked) = self.core.parked.take() else {
             return Ok(());
         };
-        let bytes = self.parking.options.park.store.take(self.parking.key)?;
-        self.core.live = Some(Core::restore(&bytes, parked, &self.parking.options)?);
+        let bytes = self.parking.options.park.store.take(self.parking.key).inspect_err(|error| {
+            log::error!(target: "gpui_cn::terminal", "could not take a parked terminal's snapshot: {error}");
+        })?;
+        self.core.live = Some(Core::restore(&bytes, parked, &self.parking.options).inspect_err(|error| {
+            log::error!(target: "gpui_cn::terminal", "could not restore a parked terminal ({} bytes): {error}", bytes.len());
+        })?);
         Ok(())
     }
 
@@ -1249,6 +1256,7 @@ impl Owner {
     }
 
     fn cleanup(&mut self) {
+        log::info!(target: "gpui_cn::terminal", "closing the pty; program exit so far: {:?}", self.exit);
         self.shared.set_closing();
         {
             let mut mail = self.shared.lock();

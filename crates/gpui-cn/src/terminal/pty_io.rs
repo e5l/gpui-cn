@@ -147,9 +147,11 @@ mod unix {
             ];
             // SAFETY: the array holds two valid pollfd entries.
             if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
-                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
+                log::warn!(target: "gpui_cn::terminal", "pty reader stops: poll failed: {error}");
                 break;
             }
             if fds[1].revents != 0 {
@@ -163,6 +165,7 @@ mod unix {
                 sink.writable();
             }
             if events & libc::POLLNVAL != 0 {
+                log::warn!(target: "gpui_cn::terminal", "pty reader stops: the pty is no longer open");
                 break;
             }
             if events & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
@@ -170,7 +173,10 @@ mod unix {
                     break;
                 }
                 match read_into(reader.as_raw_fd(), &mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        log::info!(target: "gpui_cn::terminal", "pty reader stops: end of output");
+                        break;
+                    }
                     Ok(read) => {
                         if !sink.write(&buf[..read]) {
                             break;
@@ -188,7 +194,10 @@ mod unix {
                         }
                     }
                     // EIO: the program and every holder of the pty are gone.
-                    Err(_) => break,
+                    Err(error) => {
+                        log::info!(target: "gpui_cn::terminal", "pty reader stops: {error}");
+                        break;
+                    }
                 }
             }
         }
